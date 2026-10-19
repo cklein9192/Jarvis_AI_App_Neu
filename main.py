@@ -1,7 +1,9 @@
 # V18.6.0 – J.A.R.V.I.S. Smart Commands Offline für Pydroid 3
-# Bewährte V18.6.0-Basis. Die ursprüngliche Datei bleibt zusätzlich als Backup erhalten.
+# Baut auf der funktionierenden V18.6.0 auf: ergänzt Uhr/Wecker, Kalender und Telefon-Wählbildschirm.
+# Die Originaldateien bleiben unverändert.
 # Kein Internet für die eingebauten Befehle erforderlich.
-# Hinweis: Ein dauerhaftes Wakeword ist in dieser Version nicht enthalten.
+# Hinweis: Mikrofon-Wakeword ist hier bewusst noch nicht enthalten, da Pydroid auf dem
+# bisherigen Gerät keine Mikrofonberechtigung angeboten hat.
 
 from datetime import datetime
 import re
@@ -10,8 +12,6 @@ from kivy.app import App
 from kivy.lang import Builder
 from kivy.utils import platform
 from kivy.core.window import Window
-
-__version__ = "18.6.0"
 
 KV = r"""
 BoxLayout:
@@ -105,7 +105,7 @@ class JarvisOfflinePlus(App):
             self.TextToSpeech = TextToSpeech
             self.tts.setLanguage(Locale.GERMAN)
             self.tts_ready = True
-        except Exception:
+        except Exception as exc:
             self.tts = None
             self.tts_ready = False
             self.answer = "Sprachausgabe konnte nicht gestartet werden. Prüfen Sie Pydroid und Android-TTS."
@@ -121,9 +121,9 @@ class JarvisOfflinePlus(App):
             try:
                 self.tts.speak(self.answer, self.TextToSpeech.QUEUE_FLUSH, None)
             except Exception:
-                self.set_answer(self.answer + "\\n\\n[Sprachausgabe gerade nicht verfügbar.]")
+                self.set_answer(self.answer + "\n\n[Sprachausgabe gerade nicht verfügbar.]")
         else:
-            self.set_answer(self.answer + "\\n\\n[Android-TTS ist nicht verfügbar.]")
+            self.set_answer(self.answer + "\n\n[Android-TTS ist nicht verfügbar.]")
 
     def get_battery_info(self):
         try:
@@ -132,8 +132,11 @@ class JarvisOfflinePlus(App):
             Intent = autoclass('android.content.Intent')
             IntentFilter = autoclass('android.content.IntentFilter')
             BatteryManager = autoclass('android.os.BatteryManager')
+
             activity = PythonActivity.mActivity
-            intent = activity.registerReceiver(None, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            intent = activity.registerReceiver(
+                None, IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+            )
             if intent is None:
                 return "Sir, der Akkustand konnte gerade nicht ausgelesen werden."
             level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
@@ -162,13 +165,19 @@ class JarvisOfflinePlus(App):
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
             Settings = autoclass('android.provider.Settings')
             Intent = autoclass('android.content.Intent')
-            actions = {"wifi": Settings.ACTION_WIFI_SETTINGS,
-                       "bluetooth": Settings.ACTION_BLUETOOTH_SETTINGS,
-                       "settings": Settings.ACTION_SETTINGS}
-            PythonActivity.mActivity.startActivity(Intent(actions[setting_type]))
-            return {"wifi": "Ich öffne die WLAN-Einstellungen, Sir.",
-                    "bluetooth": "Ich öffne die Bluetooth-Einstellungen, Sir.",
-                    "settings": "Ich öffne die Android-Einstellungen, Sir."}[setting_type]
+            actions = {
+                "wifi": Settings.ACTION_WIFI_SETTINGS,
+                "bluetooth": Settings.ACTION_BLUETOOTH_SETTINGS,
+                "settings": Settings.ACTION_SETTINGS
+            }
+            action = actions[setting_type]
+            intent = Intent(action)
+            PythonActivity.mActivity.startActivity(intent)
+            return {
+                "wifi": "Ich öffne die WLAN-Einstellungen, Sir.",
+                "bluetooth": "Ich öffne die Bluetooth-Einstellungen, Sir.",
+                "settings": "Ich öffne die Android-Einstellungen, Sir."
+            }[setting_type]
         except Exception:
             return "Sir, diese Android-Einstellung konnte nicht geöffnet werden."
 
@@ -177,37 +186,60 @@ class JarvisOfflinePlus(App):
             from jnius import autoclass
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
             Intent = autoclass('android.content.Intent')
+            PackageManager = autoclass('android.content.pm.PackageManager')
             activity = PythonActivity.mActivity
             pm = activity.getPackageManager()
+
             if app_type == "dialer":
-                activity.startActivity(Intent(Intent.ACTION_DIAL))
+                intent = Intent(Intent.ACTION_DIAL)
+                activity.startActivity(intent)
                 return "Ich öffne die Telefon-App, Sir. Es wird kein Anruf gestartet."
-            category = {"clock": "android.intent.category.APP_CLOCK",
-                        "calendar": "android.intent.category.APP_CALENDAR"}[app_type]
+
+            # Try Android's standard app category first.
+            category = {
+                "clock": "android.intent.category.APP_CLOCK",
+                "calendar": "android.intent.category.APP_CALENDAR",
+            }[app_type]
             intent = Intent(Intent.ACTION_MAIN)
             intent.addCategory(category)
             if intent.resolveActivity(pm) is not None:
                 activity.startActivity(intent)
-                return {"clock": "Ich öffne die Uhr-App, Sir.",
-                        "calendar": "Ich öffne den Kalender, Sir."}[app_type]
+                return {
+                    "clock": "Ich öffne die Uhr-App, Sir.",
+                    "calendar": "Ich öffne den Kalender, Sir."
+                }[app_type]
+
+            # Fallback: open a suitable installed app through its launcher intent.
             candidates = {
-                "clock": [("com.google.android.deskclock", "com.android.deskclock.DeskClock"),
-                          ("com.sec.android.app.clockpackage", "com.sec.android.app.clockpackage.ClockPackage"),
-                          ("com.android.deskclock", "com.android.deskclock.DeskClock")],
-                "calendar": [("com.samsung.android.calendar", "com.android.calendar.AllInOneActivity"),
-                             ("com.samsung.android.calendar", "com.samsung.android.app.calendar.activity.MainActivity"),
-                             ("com.google.android.calendar", "com.android.calendar.AllInOneActivity"),
-                             ("com.android.calendar", "com.android.calendar.AllInOneActivity")]}
-            for package_name, activity_name in candidates[app_type]:
+                "clock": [
+                    ("com.google.android.deskclock", "com.android.deskclock.DeskClock"),
+                    ("com.sec.android.app.clockpackage", "com.sec.android.app.clockpackage.ClockPackage"),
+                    ("com.android.deskclock", "com.android.deskclock.DeskClock"),
+                ],
+                "calendar": [
+                    ("com.samsung.android.calendar", "com.android.calendar.AllInOneActivity"),
+                    ("com.samsung.android.calendar", "com.samsung.android.app.calendar.activity.MainActivity"),
+                    ("com.google.android.calendar", "com.android.calendar.AllInOneActivity"),
+                    ("com.android.calendar", "com.android.calendar.AllInOneActivity"),
+                ],
+            }[app_type]
+
+            # Explicit component intents can work even when Android package
+            # visibility prevents querying the installed app by package name.
+            for package_name, activity_name in candidates:
                 try:
                     explicit = Intent()
                     explicit.setClassName(package_name, activity_name)
                     if explicit.resolveActivity(pm) is not None:
                         activity.startActivity(explicit)
-                        return {"clock": "Ich öffne die Uhr-App, Sir.",
-                                "calendar": "Ich öffne den Kalender, Sir."}[app_type]
+                        return {
+                            "clock": "Ich öffne die Uhr-App, Sir.",
+                            "calendar": "Ich öffne den Kalender, Sir."
+                        }[app_type]
                 except Exception:
                     continue
+
+            # Final fallback: ask Android to display the calendar's current time.
             if app_type == "calendar":
                 try:
                     Uri = autoclass('android.net.Uri')
@@ -217,6 +249,7 @@ class JarvisOfflinePlus(App):
                     return "Ich versuche, den Kalender zu öffnen, Sir."
                 except Exception:
                     pass
+
             return ("Sir, Android hat den passenden App-Aufruf nicht angenommen. "
                     "Der Kalender ist zwar installiert, aber sein Startaufruf muss "
                     "noch genauer an Ihr Gerät angepasst werden.")
@@ -227,38 +260,50 @@ class JarvisOfflinePlus(App):
     def normalize(self, text):
         text = text.lower().strip()
         text = text.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
-        return re.sub(r"\\s+", " ", text)
+        return re.sub(r"\s+", " ", text)
 
     def run_command(self):
-        command = self.normalize(self.root.ids.command_input.text.strip())
+        raw = self.root.ids.command_input.text.strip()
+        command = self.normalize(raw)
         if not command:
             self.set_answer("Bitte geben Sie einen Befehl ein, Sir.")
             return
-        if any(x in command for x in ("akkustand", "akku stand", "batterie", "ladezustand",
-            "wie viel akku", "wieviel akku", "wie voll", "akku prozent", "wie viel prozent",
-            "wie viele prozent", "laedt mein handy", "laedt das handy",
-            "wird mein handy geladen", "wie viel ladung", "akku noch", "batterie noch", "restakku")):
+
+        # Flexible local phrase matching: many common German formulations map to the same command.
+        if any(x in command for x in (
+            "akkustand", "akku stand", "batterie", "ladezustand",
+            "wie viel akku", "wieviel akku", "wie voll", "akku prozent",
+            "wie viel prozent", "wie viele prozent", "laedt mein handy",
+            "laedt das handy", "wird mein handy geladen", "wie viel ladung",
+            "akku noch", "batterie noch", "restakku"
+        )):
             answer = self.get_battery_info()
-        elif any(x in command for x in ("wlan einstellungen", "wifi einstellungen", "oeffne wlan",
-            "oeffne wifi", "wlan anzeigen", "wlan aufmachen")):
+        elif any(x in command for x in ("wlan einstellungen", "wifi einstellungen",
+                                         "oeffne wlan", "oeffne wifi", "wlan anzeigen",
+                                         "wlan aufmachen")):
             answer = self.open_android_settings("wifi")
-        elif any(x in command for x in ("bluetooth einstellungen", "oeffne bluetooth", "bluetooth aufmachen")):
+        elif any(x in command for x in ("bluetooth einstellungen", "oeffne bluetooth",
+                                         "bluetooth aufmachen")):
             answer = self.open_android_settings("bluetooth")
         elif any(x in command for x in ("android einstellungen", "oeffne einstellungen",
-            "systemeinstellungen", "handy einstellungen", "einstellungen aufmachen")):
+                                         "systemeinstellungen", "handy einstellungen",
+                                         "einstellungen aufmachen")):
             answer = self.open_android_settings("settings")
-        elif any(x in command for x in ("oeffne uhr", "oeffne die uhr", "uhr starten", "wecker", "alarm")):
+        elif any(x in command for x in ("oeffne uhr", "oeffne die uhr", "uhr starten",
+                                         "wecker", "alarm")):
             answer = self.open_phone_app("clock")
-        elif any(x in command for x in ("oeffne kalender", "oeffne den kalender", "kalender starten", "zeige kalender")):
+        elif any(x in command for x in ("oeffne kalender", "oeffne den kalender",
+                                         "kalender starten", "zeige kalender")):
             answer = self.open_phone_app("calendar")
         elif any(x in command for x in ("oeffne telefon", "telefon-app", "waehlen",
-            "telefon oeffnen", "oeffne waehler", "waehlbildschirm")):
+                                         "telefon oeffnen", "oeffne waehler", "waehlbildschirm")):
             answer = self.open_phone_app("dialer")
         elif any(x in command for x in ("uhrzeit", "wie spaet", "wie viel uhr",
-            "wieviel uhr", "aktuelle zeit", "sag mir die zeit")):
+                                         "wieviel uhr", "aktuelle zeit", "sag mir die zeit")):
             answer = "Sir, es ist " + datetime.now().strftime("%H:%M") + " Uhr."
         elif any(x in command for x in ("datum", "welcher tag", "welches datum",
-            "heutige datum", "welches datum ist heute", "sag mir das datum")):
+                                         "heutige datum", "welches datum ist heute",
+                                         "sag mir das datum")):
             answer = "Sir, heute ist der " + datetime.now().strftime("%d.%m.%Y") + "."
         elif any(x in command for x in ("wer bist du", "wie heisst du", "dein name")):
             answer = "Ich bin J.A.R.V.I.S., Ihr Offline-Assistent, Sir."
@@ -281,14 +326,22 @@ class JarvisOfflinePlus(App):
         self.set_answer(answer)
 
     def help_text(self):
-        return ("[b]Offline-Befehle[/b]\\n"
-            "• Wie spät ist es?\\n• Welches Datum haben wir?\\n• Wie ist mein Akkustand?\\n"
-            "• Öffne WLAN-Einstellungen\\n• Öffne Bluetooth-Einstellungen\\n"
-            "• Öffne Android-Einstellungen\\n• Öffne Uhr / Wecker\\n• Öffne Kalender\\n"
-            "• Öffne Telefon / Wählbildschirm\\n• Wer bist du?\\n• Was kannst du?\\n"
-            "• Stopp (Sprachausgabe stoppen)\\n\\n"
-            "Sie können Text über die Mikrofon-Diktierfunktion der Tastatur eingeben. "
-            "Ein eigenes dauerhaftes Aktivierungswort ist noch nicht enthalten.")
+        return (
+            "[b]Offline-Befehle[/b]\n"
+            "• Wie spät ist es?\n"
+            "• Welches Datum haben wir?\n"
+            "• Wie ist mein Akkustand?\n"
+            "• Öffne WLAN-Einstellungen\n"
+            "• Öffne Bluetooth-Einstellungen\n"
+            "• Öffne Android-Einstellungen\n"
+            "• Wer bist du?\n"
+            "• Was kannst du?\n"
+            "• Stopp (Sprachausgabe stoppen)\n\n"
+            "Tipp: Sie können das Mikrofon Ihrer Samsung-Tastatur zum Diktieren nutzen; "
+            "der erkannte Text erscheint im Befehlsfeld. Danach tippen Sie auf "
+            "BEFEHL AUSFÜHREN. Die Diktierfunktion gehört zur Tastatur, nicht zu J.A.R.V.I.S. "
+            "Ein eigenes Mikrofon und Aktivierungswort sind noch nicht enthalten."
+        )
 
     def show_help(self):
         self.set_answer(self.help_text())
